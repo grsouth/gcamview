@@ -63,6 +63,33 @@ fn build_ui(app: &adw::Application, first_camera_url: String) {
     let (playbin, paintable) = build_player(&first_camera_url);
     picture.set_paintable(Some(&paintable));
 
+    let bus = playbin
+        .bus()
+        .expect("Playbin has no bus; cannot watch state");
+    let playbin_obj = playbin.clone().upcast::<gst::Object>();
+    let overlay_label_for_bus = overlay_label.clone();
+    let bus_watch = bus
+        .add_watch_local(move |_, msg| {
+            if let gst::MessageView::StateChanged(state) = msg.view() {
+                if msg
+                    .src()
+                    .as_ref()
+                    .map(|src| src.as_ptr() == playbin_obj.as_ptr())
+                    .unwrap_or(false)
+                    && state.current() == gst::State::Playing
+                {
+                    overlay_label_for_bus.set_visible(false);
+                    return glib::ControlFlow::Break;
+                }
+            }
+            glib::ControlFlow::Continue
+        })
+        .expect("Failed to add bus watch");
+    // Keep bus watch alive for the window lifetime.
+    unsafe {
+        window.set_data("bus-watch", bus_watch);
+    }
+
     playbin
         .set_state(gst::State::Playing)
         .expect("Failed to set Playing");
