@@ -1,0 +1,4 @@
+[cameras]
+driveway_rtsp_url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
+frontdoor_rtsp_url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
+stairs_rtsp_url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
