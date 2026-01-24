@@ -16,34 +16,68 @@ fn main() -> glib::ExitCode {
     let mut keys: Vec<&String> = config.camera_urls.keys().collect();
     keys.sort();
 
-    let first_key: &str = keys
-        .first()
-        .expect("No cameras defined in config.toml")
-        .as_str();
+    let cameras: Vec<(String, String)> = keys
+        .into_iter()
+        .map(|key| {
+            let url = config
+                .camera_urls
+                .get(key)
+                .expect("Camera key missing unexpectedly")
+                .clone();
+            (key.clone(), url)
+        })
+        .collect();
 
-    let first_camera_url: String = config
-        .camera_urls
-        .get(first_key)
-        .expect("Camera key missing unexpectedly")
-        .clone();
+    if cameras.is_empty() {
+        panic!("No cameras defined in config.toml");
+    }
 
     let app = adw::Application::builder()
         .application_id("com.garrett.gcamview")
         .build();
 
-    // Move first_camera_url into the activate handler
-    app.connect_activate(move |app| build_ui(app, first_camera_url.clone()));
+    // Move cameras into the activate handler
+    app.connect_activate(move |app| build_ui(app, cameras.clone()));
 
     app.run()
 }
 
-fn build_ui(app: &adw::Application, first_camera_url: String) {
+fn build_ui(app: &adw::Application, cameras: Vec<(String, String)>) {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(
+        "
+        .camera-button {
+            background-color: rgba(20, 20, 20, 0.9);
+            color: #f7f7f7;
+            min-height: 64px;
+            min-width: 140px;
+            padding: 10px 18px;
+            font-size: 18px;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        .camera-button:checked {
+            background-color: rgba(35, 35, 35, 0.95);
+        }
+        ",
+    );
+    gtk::style_context_add_provider_for_display(
+        &gdk::Display::default().expect("No display available"),
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
     let picture = gtk::Picture::new();
     picture.set_hexpand(true);
     picture.set_vexpand(true);
     picture.set_can_shrink(true);
 
-    let overlay_label = gtk::Label::new(Some("Loading stream..."));
+    let (first_name, first_camera_url) = cameras
+        .first()
+        .expect("No cameras defined in config.toml")
+        .clone();
+
+    let overlay_label = gtk::Label::new(Some(&format!("Loading {first_name}...")));
     overlay_label.set_margin_top(12);
     overlay_label.set_margin_start(12);
     overlay_label.set_halign(gtk::Align::Start);
@@ -53,15 +87,52 @@ fn build_ui(app: &adw::Application, first_camera_url: String) {
     overlay.set_child(Some(&picture));
     overlay.add_overlay(&overlay_label);
 
+    let (playbin, paintable) = build_player(&first_camera_url);
+    picture.set_paintable(Some(&paintable));
+
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    controls.set_halign(gtk::Align::Center);
+    controls.set_valign(gtk::Align::Start);
+    controls.set_margin_top(12);
+    controls.set_margin_start(12);
+    controls.set_margin_end(12);
+
+    let mut first_button: Option<gtk::ToggleButton> = None;
+    for (name, url) in cameras.iter() {
+        let button = gtk::ToggleButton::with_label(name);
+        button.add_css_class("camera-button");
+        if let Some(existing) = &first_button {
+            button.set_group(Some(existing));
+        } else {
+            button.set_active(true);
+            first_button = Some(button.clone());
+        }
+
+        let playbin_for_button = playbin.clone();
+        let overlay_label_for_button = overlay_label.clone();
+        let name = name.clone();
+        let url = url.clone();
+        button.connect_toggled(move |btn| {
+            if btn.is_active() {
+                overlay_label_for_button.set_text(&format!("Loading {name}..."));
+                overlay_label_for_button.set_visible(true);
+                let _ = playbin_for_button.set_state(gst::State::Null);
+                playbin_for_button.set_property("uri", &url);
+                let _ = playbin_for_button.set_state(gst::State::Playing);
+            }
+        });
+
+        controls.append(&button);
+    }
+
+    overlay.add_overlay(&controls);
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("gcamview")
         .content(&overlay)
         .build();
     window.fullscreen();
-
-    let (playbin, paintable) = build_player(&first_camera_url);
-    picture.set_paintable(Some(&paintable));
 
     let bus = playbin
         .bus()
@@ -79,7 +150,6 @@ fn build_ui(app: &adw::Application, first_camera_url: String) {
                     && state.current() == gst::State::Playing
                 {
                     overlay_label_for_bus.set_visible(false);
-                    return glib::ControlFlow::Break;
                 }
             }
             glib::ControlFlow::Continue
