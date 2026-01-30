@@ -61,8 +61,9 @@ impl Default for WakeConfig {
         Self {
             enabled: false,
             commands: vec![
-                "loginctl unlock-session".to_string(),
+                "gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SimulateUserActivity".to_string(),
                 "gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SetActive false".to_string(),
+                "loginctl unlock-session".to_string(),
             ],
         }
     }

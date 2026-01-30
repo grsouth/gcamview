@@ -17,8 +17,9 @@ port = 1883
 [actions.wake]
 enabled = false
 commands = [
-  "loginctl unlock-session",
+  "gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SimulateUserActivity",
   "gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SetActive false",
+  "loginctl unlock-session",
 ]
 
 [actions.tts]
