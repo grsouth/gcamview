@@ -13,3 +13,14 @@ url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
 [mqtt]
 host = "127.0.0.1"
 port = 1883
+
+[actions.wake]
+enabled = false
+commands = [
+  "loginctl unlock-session",
+  "gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SetActive false",
+]
+
+[actions.tts]
+enabled = false
+command = "spd-say {text}"

@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
+use std::thread;
 
 use gstreamer as gst;
 use gst::prelude::*;
@@ -40,7 +41,10 @@ struct FrigateAfter {
 
 #[derive(Debug, Clone)]
 enum UiCommand {
-    SwitchToCamera(String),
+    Event {
+        camera_id: String,
+        label: String,
+    },
 }
 
 
@@ -84,12 +88,18 @@ fn main() -> glib::ExitCode {
     });
 
     let mqtt = config.mqtt.clone();
-    app.connect_activate(move |app| build_ui(app, cameras.clone(), mqtt.clone()));
+    let actions = config.actions.clone();
+    app.connect_activate(move |app| build_ui(app, cameras.clone(), mqtt.clone(), actions.clone()));
 
     app.run()
 }
 
-fn build_ui(app: &adw::Application, cameras: Vec<Camera>, mqtt: config::MqttConfig) {
+fn build_ui(
+    app: &adw::Application,
+    cameras: Vec<Camera>,
+    mqtt: config::MqttConfig,
+    actions: config::ActionsConfig,
+) {
     const CSS: &str = r#"
     .camera-button {
         background-color: rgba(20, 20, 20, 0.9);
@@ -149,6 +159,7 @@ fn build_ui(app: &adw::Application, cameras: Vec<Camera>, mqtt: config::MqttConf
 
     let mut first_button: Option<gtk::ToggleButton> = None;
     let mut button_by_id: HashMap<String, gtk::ToggleButton> = HashMap::new();
+    let mut label_by_id: HashMap<String, String> = HashMap::new();
     for camera in cameras.iter() {
         let button = gtk::ToggleButton::with_label(&camera.label);
         button.add_css_class("camera-button");
@@ -201,6 +212,7 @@ fn build_ui(app: &adw::Application, cameras: Vec<Camera>, mqtt: config::MqttConf
         });
 
         button_by_id.insert(camera.id.clone(), button.clone());
+        label_by_id.insert(camera.id.clone(), camera.label.clone());
         controls.append(&button);
     }
 
@@ -228,15 +240,26 @@ fn build_ui(app: &adw::Application, cameras: Vec<Camera>, mqtt: config::MqttConf
     start_mqtt_thread(sender, mqtt);
 
     let button_by_id = Rc::new(button_by_id);
+    let label_by_id = Rc::new(label_by_id);
+    let actions = Rc::new(actions);
     glib::timeout_add_local(Duration::from_millis(100), move || {
         for cmd in receiver.try_iter() {
             match cmd {
-                UiCommand::SwitchToCamera(id) => {
-                    if let Some(button) = button_by_id.get(&id) {
+                UiCommand::Event { camera_id, label } => {
+                    if let Some(button) = button_by_id.get(&camera_id) {
                         button.set_active(true);
                     } else {
-                        eprintln!("MQTT switch requested unknown camera id: {id}");
+                        eprintln!("MQTT switch requested unknown camera id: {camera_id}");
                     }
+
+                    let camera_label = label_by_id
+                        .get(&camera_id)
+                        .cloned()
+                        .unwrap_or(camera_id);
+                    let actions = actions.as_ref().clone();
+                    thread::spawn(move || {
+                        run_actions(&actions, &camera_label, &label);
+                    });
                 }
             }
         }
@@ -413,7 +436,54 @@ fn start_mqtt_thread(sender: mpsc::Sender<UiCommand>, mqtt: config::MqttConfig) 
             if !label.is_empty() {
                 eprintln!("Frigate event: camera={cam} label={label}");
             }
-            let _ = sender.send(UiCommand::SwitchToCamera(cam));
+            let _ = sender.send(UiCommand::Event {
+                camera_id: cam,
+                label,
+            });
         }
     });
+}
+
+fn run_actions(actions: &config::ActionsConfig, camera_label: &str, label: &str) {
+    if actions.wake.enabled {
+        for cmd in actions.wake.commands.iter() {
+            run_shell_command(cmd);
+        }
+    }
+
+    if actions.tts.enabled {
+        let spoken = format!("{} {}", camera_label, capitalize_first(label));
+        let escaped = shell_escape_single_quotes(&spoken);
+        let cmd = actions
+            .tts
+            .command
+            .replace("{text}", &escaped);
+        run_shell_command(&cmd);
+    }
+}
+
+fn run_shell_command(cmd: &str) {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .status();
+    if let Err(err) = status {
+        eprintln!("Action command failed: {cmd} ({err})");
+    }
+}
+
+fn shell_escape_single_quotes(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+fn capitalize_first(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.push(first.to_ascii_uppercase());
+    out.push_str(chars.as_str());
+    out
 }
