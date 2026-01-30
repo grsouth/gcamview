@@ -114,6 +114,20 @@ fn build_ui(
     .camera-button:checked {
         background-color: rgba(35, 35, 35, 0.95);
     }
+    .audio-button {
+        background-color: rgba(120, 20, 20, 0.9);
+        color: #fff5f5;
+        min-height: 46px;
+        min-width: 140px;
+        padding: 6px 14px;
+        font-size: 15px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+    }
+    .audio-button:checked {
+        background-color: rgba(20, 120, 20, 0.95);
+        color: #f4fff4;
+    }
     "#;
 
     let provider = gtk::CssProvider::new();
@@ -145,7 +159,11 @@ fn build_ui(
     overlay.set_child(Some(&picture));
     overlay.add_overlay(&overlay_label);
 
-    let (pipeline, paintable) = build_pipeline(&first_url);
+    let audio_enabled = Rc::new(RefCell::new(false));
+    let current_url = Rc::new(RefCell::new(first_url.clone()));
+    let current_label = Rc::new(RefCell::new(first_label.clone()));
+
+    let (pipeline, paintable) = build_pipeline(&first_url, *audio_enabled.borrow());
     let pipeline = Rc::new(RefCell::new(pipeline));
     let bus_watch_guard: Rc<RefCell<Option<BusWatchGuard>>> = Rc::new(RefCell::new(None));
     picture.set_paintable(Some(&paintable));
@@ -156,6 +174,7 @@ fn build_ui(
     controls.set_margin_top(12);
     controls.set_margin_start(12);
     controls.set_margin_end(12);
+    controls.set_hexpand(true);
 
     let mut first_button: Option<gtk::ToggleButton> = None;
     let mut button_by_id: HashMap<String, gtk::ToggleButton> = HashMap::new();
@@ -177,9 +196,14 @@ fn build_ui(
         let overlay_label_for_button = overlay_label.clone();
         let label = camera.label.clone();
         let url = camera.url.clone();
+        let audio_enabled_for_button = audio_enabled.clone();
+        let current_url_for_button = current_url.clone();
+        let current_label_for_button = current_label.clone();
 
         button.connect_toggled(move |btn| {
             if btn.is_active() {
+                *current_url_for_button.borrow_mut() = url.clone();
+                *current_label_for_button.borrow_mut() = label.clone();
                 overlay_label_for_button.set_text(&format!("Loading {label}..."));
                 overlay_label_for_button.set_visible(true);
 
@@ -190,7 +214,8 @@ fn build_ui(
                     let _ = current.set_state(gst::State::Null);
                 }
 
-                let (new_pipeline, new_paintable) = build_pipeline(&url);
+                let (new_pipeline, new_paintable) =
+                    build_pipeline(&url, *audio_enabled_for_button.borrow());
                 picture_for_button.set_paintable(Some(&new_paintable));
 
                 {
@@ -215,6 +240,57 @@ fn build_ui(
         label_by_id.insert(camera.id.clone(), camera.label.clone());
         controls.append(&button);
     }
+
+    let audio_toggle = gtk::ToggleButton::with_label("Audio: Muted");
+    audio_toggle.add_css_class("audio-button");
+    audio_toggle.set_halign(gtk::Align::End);
+    let audio_enabled_for_toggle = audio_enabled.clone();
+    let pipeline_for_toggle = pipeline.clone();
+    let bus_watch_for_toggle = bus_watch_guard.clone();
+    let picture_for_toggle = picture.clone();
+    let overlay_label_for_toggle = overlay_label.clone();
+    let current_url_for_toggle = current_url.clone();
+    let current_label_for_toggle = current_label.clone();
+    audio_toggle.connect_toggled(move |btn| {
+        *audio_enabled_for_toggle.borrow_mut() = btn.is_active();
+        if btn.is_active() {
+            btn.set_label("Audio: On");
+        } else {
+            btn.set_label("Audio: Muted");
+        }
+        let label = current_label_for_toggle.borrow().clone();
+        let url = current_url_for_toggle.borrow().clone();
+        overlay_label_for_toggle.set_text(&format!("Loading {label}..."));
+        overlay_label_for_toggle.set_visible(true);
+
+        let _ = bus_watch_for_toggle.borrow_mut().take();
+
+        {
+            let current = pipeline_for_toggle.borrow_mut();
+            let _ = current.set_state(gst::State::Null);
+        }
+
+        let (new_pipeline, new_paintable) =
+            build_pipeline(&url, *audio_enabled_for_toggle.borrow());
+        picture_for_toggle.set_paintable(Some(&new_paintable));
+
+        {
+            let mut current = pipeline_for_toggle.borrow_mut();
+            *current = new_pipeline;
+        }
+
+        let guard = attach_bus_watch(&pipeline_for_toggle.borrow(), &overlay_label_for_toggle);
+        *bus_watch_for_toggle.borrow_mut() = Some(guard);
+
+        pipeline_for_toggle
+            .borrow()
+            .set_state(gst::State::Playing)
+            .expect("Failed to set Playing");
+    });
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    controls.append(&spacer);
+    controls.append(&audio_toggle);
 
     overlay.add_overlay(&controls);
 
@@ -308,8 +384,17 @@ impl Camera {
     }
 }
 
-fn build_pipeline(uri: &str) -> (gst::Pipeline, gdk::Paintable) {
+fn build_pipeline(uri: &str, audio_enabled: bool) -> (gst::Pipeline, gdk::Paintable) {
     let safe_uri = uri.replace('"', "%22");
+    let audio_branch = if audio_enabled {
+        r#"
+            src. ! application/x-rtp,media=audio !
+                queue ! decodebin ! audioconvert ! audioresample !
+                autoaudiosink
+        "#
+    } else {
+        ""
+    };
 
     let desc = format!(
         r#"
@@ -317,9 +402,7 @@ fn build_pipeline(uri: &str) -> (gst::Pipeline, gdk::Paintable) {
             src. ! application/x-rtp,media=video !
                 queue ! decodebin ! videoconvert !
                 gtk4paintablesink name=sink sync=false
-            src. ! application/x-rtp,media=audio !
-                queue ! decodebin ! audioconvert ! audioresample !
-                autoaudiosink
+        {audio_branch}
         "#
     );
 
