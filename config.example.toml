@@ -22,5 +22,5 @@ commands = [
 ]
 
 [actions.tts]
-enabled = false
-command = "spd-say {text}"
+enabled = true
+command = "echo {text} | piper-tts -q -m \"/usr/share/piper-voices/en/en_US/ryan/high/en_US-ryan-high.onnx\" -f - | paplay"

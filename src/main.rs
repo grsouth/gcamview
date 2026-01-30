@@ -255,10 +255,10 @@ fn build_ui(
                     let camera_label = label_by_id
                         .get(&camera_id)
                         .cloned()
-                        .unwrap_or(camera_id);
+                        .unwrap_or_else(|| camera_id.clone());
                     let actions = actions.as_ref().clone();
                     thread::spawn(move || {
-                        run_actions(&actions, &camera_label, &label);
+                        run_actions(&actions, &camera_id, &camera_label, &label);
                     });
                 }
             }
@@ -444,7 +444,12 @@ fn start_mqtt_thread(sender: mpsc::Sender<UiCommand>, mqtt: config::MqttConfig) 
     });
 }
 
-fn run_actions(actions: &config::ActionsConfig, camera_label: &str, label: &str) {
+fn run_actions(
+    actions: &config::ActionsConfig,
+    camera_id: &str,
+    camera_label: &str,
+    label: &str,
+) {
     if actions.wake.enabled {
         for cmd in actions.wake.commands.iter() {
             run_shell_command(cmd);
@@ -452,7 +457,7 @@ fn run_actions(actions: &config::ActionsConfig, camera_label: &str, label: &str)
     }
 
     if actions.tts.enabled {
-        let spoken = format!("{} {}", camera_label, capitalize_first(label));
+        let spoken = tts_phrase(camera_id, camera_label, label);
         let escaped = shell_escape_single_quotes(&spoken);
         let cmd = actions
             .tts
@@ -475,6 +480,20 @@ fn run_shell_command(cmd: &str) {
 fn shell_escape_single_quotes(value: &str) -> String {
     let escaped = value.replace('\'', "'\\''");
     format!("'{escaped}'")
+}
+
+fn tts_phrase(camera_id: &str, camera_label: &str, label: &str) -> String {
+    let label = label.to_ascii_lowercase();
+    if label == "person" {
+        match camera_id {
+            "driveway" => "Person in driveway".to_string(),
+            "stairs" => "Person on stairs".to_string(),
+            "front_door" => "Person at front door".to_string(),
+            _ => format!("Person at {camera_label}"),
+        }
+    } else {
+        format!("{} at {camera_label}", capitalize_first(&label))
+    }
 }
 
 fn capitalize_first(value: &str) -> String {
