@@ -1,4 +1,15 @@
-[camera_urls]
-driveway_rtsp_url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
-frontdoor_rtsp_url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
-stairs_rtsp_url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
+[cameras.driveway]
+label = "Driveway"
+url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
+
+[cameras.front_door]
+label = "Front Door"
+url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
+
+[cameras.stairs]
+label = "Stairs"
+url = "rtsp://USER:PASS@CAMERA_IP:554/stream"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883

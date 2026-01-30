@@ -1,31 +1,73 @@
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::mpsc;
 
 use gstreamer as gst;
 use gst::prelude::*;
 use gst::bus::BusWatchGuard;
 
+use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
+use serde::Deserialize;
+use std::time::{Duration, Instant};
+
 mod config;
+
+#[derive(Clone)]
+struct Camera {
+    id: String,
+    label: String,
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FrigateEvent {
+    #[serde(default)]
+    r#type: String,
+    #[serde(default)]
+    after: FrigateAfter,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FrigateAfter {
+    #[serde(default)]
+    camera: String,
+    #[serde(default)]
+    label: String,
+}
+
+#[derive(Debug, Clone)]
+enum UiCommand {
+    SwitchToCamera(String),
+}
+
+
 
 fn main() -> glib::ExitCode {
     gst::init().expect("Failed to initialize GStreamer");
 
     let config = config::load_config();
 
-    let mut keys: Vec<&String> = config.camera_urls.keys().collect();
+    let mut keys: Vec<&String> = config.cameras.keys().collect();
     keys.sort();
 
-    let cameras: Vec<(String, String)> = keys
+    let cameras: Vec<Camera> = keys
         .into_iter()
         .map(|key| {
-            let url = config
-                .camera_urls
+            let camera = config
+                .cameras
                 .get(key)
-                .expect("Camera key missing unexpectedly")
-                .clone();
-            (key.clone(), url)
+                .expect("Camera key missing unexpectedly");
+            Camera {
+                id: key.clone(),
+                label: camera
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| default_label(key)),
+                url: camera.url.clone(),
+            }
         })
         .collect();
 
@@ -37,12 +79,17 @@ fn main() -> glib::ExitCode {
         .application_id("com.garrett.gcamview")
         .build();
 
-    app.connect_activate(move |app| build_ui(app, cameras.clone()));
+    app.connect_startup(|_| {
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::PreferDark);
+    });
+
+    let mqtt = config.mqtt.clone();
+    app.connect_activate(move |app| build_ui(app, cameras.clone(), mqtt.clone()));
 
     app.run()
 }
 
-fn build_ui(app: &adw::Application, cameras: Vec<(String, String)>) {
+fn build_ui(app: &adw::Application, cameras: Vec<Camera>, mqtt: config::MqttConfig) {
     const CSS: &str = r#"
     .camera-button {
         background-color: rgba(20, 20, 20, 0.9);
@@ -72,12 +119,13 @@ fn build_ui(app: &adw::Application, cameras: Vec<(String, String)>) {
     picture.set_vexpand(true);
     picture.set_can_shrink(true);
 
-    let (first_name, first_url) = cameras
+    let (first_label, first_url) = cameras
         .first()
         .expect("No cameras defined in config.toml")
-        .clone();
+        .clone()
+        .into_label_url();
 
-    let overlay_label = gtk::Label::new(Some(&format!("Loading {first_name}...")));
+    let overlay_label = gtk::Label::new(Some(&format!("Loading {first_label}...")));
     overlay_label.set_margin_top(12);
     overlay_label.set_margin_start(12);
     overlay_label.set_halign(gtk::Align::Start);
@@ -100,8 +148,9 @@ fn build_ui(app: &adw::Application, cameras: Vec<(String, String)>) {
     controls.set_margin_end(12);
 
     let mut first_button: Option<gtk::ToggleButton> = None;
-    for (name, url) in cameras.iter() {
-        let button = gtk::ToggleButton::with_label(name);
+    let mut button_by_id: HashMap<String, gtk::ToggleButton> = HashMap::new();
+    for camera in cameras.iter() {
+        let button = gtk::ToggleButton::with_label(&camera.label);
         button.add_css_class("camera-button");
 
         if let Some(existing) = &first_button {
@@ -115,18 +164,18 @@ fn build_ui(app: &adw::Application, cameras: Vec<(String, String)>) {
         let bus_watch_for_button = bus_watch_guard.clone();
         let picture_for_button = picture.clone();
         let overlay_label_for_button = overlay_label.clone();
-        let name = name.clone();
-        let url = url.clone();
+        let label = camera.label.clone();
+        let url = camera.url.clone();
 
         button.connect_toggled(move |btn| {
             if btn.is_active() {
-                overlay_label_for_button.set_text(&format!("Loading {name}..."));
+                overlay_label_for_button.set_text(&format!("Loading {label}..."));
                 overlay_label_for_button.set_visible(true);
 
                 let _ = bus_watch_for_button.borrow_mut().take();
 
                 {
-                    let mut current = pipeline_for_button.borrow_mut();
+                    let current = pipeline_for_button.borrow_mut();
                     let _ = current.set_state(gst::State::Null);
                 }
 
@@ -151,6 +200,7 @@ fn build_ui(app: &adw::Application, cameras: Vec<(String, String)>) {
             }
         });
 
+        button_by_id.insert(camera.id.clone(), button.clone());
         controls.append(&button);
     }
 
@@ -174,6 +224,25 @@ fn build_ui(app: &adw::Application, cameras: Vec<(String, String)>) {
         .set_state(gst::State::Playing)
         .expect("Failed to set Playing");
 
+    let (sender, receiver) = mpsc::channel::<UiCommand>();
+    start_mqtt_thread(sender, mqtt);
+
+    let button_by_id = Rc::new(button_by_id);
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        for cmd in receiver.try_iter() {
+            match cmd {
+                UiCommand::SwitchToCamera(id) => {
+                    if let Some(button) = button_by_id.get(&id) {
+                        button.set_active(true);
+                    } else {
+                        eprintln!("MQTT switch requested unknown camera id: {id}");
+                    }
+                }
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+
     let pipeline_for_close = pipeline.clone();
     window.connect_close_request(move |_| {
         let _ = pipeline_for_close.borrow().set_state(gst::State::Null);
@@ -181,6 +250,39 @@ fn build_ui(app: &adw::Application, cameras: Vec<(String, String)>) {
     });
 
     window.present();
+}
+
+fn default_label(id: &str) -> String {
+    let trimmed = id
+        .strip_suffix("_rtsp_url")
+        .or_else(|| id.strip_suffix("-rtsp-url"))
+        .unwrap_or(id);
+    let parts: Vec<&str> = trimmed
+        .split(|c| c == '_' || c == '-')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return trimmed.to_string();
+    }
+
+    let mut label_parts = Vec::with_capacity(parts.len());
+    for part in parts {
+        let mut chars = part.chars();
+        let mut label_part = String::new();
+        if let Some(first) = chars.next() {
+            label_part.push(first.to_ascii_uppercase());
+            label_part.push_str(chars.as_str());
+        }
+        label_parts.push(label_part);
+    }
+
+    label_parts.join(" ")
+}
+
+impl Camera {
+    fn into_label_url(self) -> (String, String) {
+        (self.label, self.url)
+    }
 }
 
 fn build_pipeline(uri: &str) -> (gst::Pipeline, gdk::Paintable) {
@@ -244,4 +346,74 @@ fn install_quit_shortcut(app: &adw::Application, window: &adw::ApplicationWindow
     let shortcut = gtk::Shortcut::new(Some(trigger), Some(action));
     controller.add_shortcut(shortcut);
     window.add_controller(controller);
+}
+
+fn start_mqtt_thread(sender: mpsc::Sender<UiCommand>, mqtt: config::MqttConfig) {
+    std::thread::spawn(move || {
+        eprintln!("MQTT: connecting to {}:{}", mqtt.host, mqtt.port);
+        let client_id = format!("gcamview-{}", std::process::id());
+        let mut opts = MqttOptions::new(client_id, mqtt.host, mqtt.port);
+        opts.set_keep_alive(Duration::from_secs(30));
+
+        // If you require username/password, uncomment:
+        // if let (Ok(u), Ok(p)) = (std::env::var("MQTT_USER"), std::env::var("MQTT_PASS")) {
+        //     opts.set_credentials(u, p);
+        // }
+
+        let (client, mut connection) = Client::new(opts, 10);
+
+        if let Err(err) = client.subscribe("frigate/events", QoS::AtMostOnce) {
+            eprintln!("MQTT: failed to subscribe to frigate/events: {err}");
+            return;
+        }
+        eprintln!("MQTT: subscribed to frigate/events");
+
+        // Basic throttle to avoid rapid-fire switches
+        let mut last_switch = Instant::now() - Duration::from_secs(60);
+        let mut last_camera: Option<String> = None;
+        let min_gap = Duration::from_millis(600);
+
+        for notification in connection.iter() {
+            let Ok(Event::Incoming(Packet::Publish(p))) = notification else {
+                continue;
+            };
+            let payload = String::from_utf8_lossy(&p.payload);
+            eprintln!("MQTT: message topic={} payload={}", p.topic, payload);
+
+            // Parse the JSON payload
+            let evt: Result<FrigateEvent, _> = serde_json::from_slice(&p.payload);
+            let Ok(evt) = evt else {
+                eprintln!("MQTT: failed to parse event payload");
+                continue;
+            };
+
+            // Only respond to "start" events and people
+            if evt.r#type != "start" {
+                eprintln!("MQTT: ignoring event type={}", evt.r#type);
+                continue;
+            }
+
+            let cam = evt.after.camera;
+            let label = evt.after.label;
+            if cam.is_empty() {
+                eprintln!("MQTT: event missing camera name");
+                continue;
+            }
+            if label != "person" {
+                eprintln!("MQTT: ignoring non-person label={label}");
+                continue;
+            }
+
+            if last_camera.as_deref() == Some(cam.as_str()) && last_switch.elapsed() < min_gap {
+                continue;
+            }
+            last_switch = Instant::now();
+            last_camera = Some(cam.clone());
+
+            if !label.is_empty() {
+                eprintln!("Frigate event: camera={cam} label={label}");
+            }
+            let _ = sender.send(UiCommand::SwitchToCamera(cam));
+        }
+    });
 }
