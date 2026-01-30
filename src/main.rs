@@ -387,8 +387,8 @@ fn start_mqtt_thread(sender: mpsc::Sender<UiCommand>, mqtt: config::MqttConfig) 
                 continue;
             };
 
-            // Only respond to "start" events and people
-            if evt.r#type != "start" {
+            // Only respond to "new" events and people (Frigate publishes new/update/end)
+            if evt.r#type != "new" {
                 eprintln!("MQTT: ignoring event type={}", evt.r#type);
                 continue;
             }
